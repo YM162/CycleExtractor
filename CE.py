@@ -908,16 +908,19 @@ def build_cycle_model(
             f_sequence_edge[edge] <= capacity_sequence_edges[edge] * X_sequence_edge[edge],
             name=f"SequenceEdgeCapacity_{edge[0]}_{edge[1]}")
     ### Constraint 3: copy number sequence edge incident = copy number discordant/concordant edge incident 
-    ##########################################################################    
+    ##########################################################################  
+    edges_at_node = {}
+    for edge in concordant_edges | discordant_edges | sequence_edges:
+        for node in edge:
+            edges_at_node.setdefault(node, set()).add(edge)  
+    
     for k in nodes:
         if k in {"s", "t"}:
             continue
     
         # Define undirected incident edges
-        incident_edges = {
-          tuple(sorted((i, k)))
-          for i in nodes
-          if tuple(sorted((i, k))) in concordant_edges | discordant_edges | sequence_edges and i != k}
+        incident_edges = {edge for edge in edges_at_node.get(k, ()) if edge[0] != edge[1]}
+        
         # Flow into k (sequence edges)
         flow_in_sequence = sum(
             f_sequence_edge[edge]
@@ -2419,15 +2422,18 @@ def build_path_model(
             name=f"SequenceEdgeCapacity_{edge[0]}_{edge[1]}")
     ### Constraint 3: copy number sequence edge incident = copy number discordant/concordant edge incident 
     ##########################################################################    
+    edges_at_node = {}
+    for edge in concordant_edges | discordant_edges | sequence_edges:
+        for node in edge:
+            edges_at_node.setdefault(node, set()).add(edge)  
+    
     for k in nodes:
         if k in {"s", "t"}:
             continue
     
         # Define undirected incident edges
-        incident_edges = {
-          tuple(sorted((i, k)))
-          for i in nodes
-          if tuple(sorted((i, k))) in concordant_edges | discordant_edges | sequence_edges and i != k}
+        incident_edges = {edge for edge in edges_at_node.get(k, ()) if edge[0] != edge[1]}
+        
         # Flow into k (sequence edges)
         flow_in_sequence = sum(
             f_sequence_edge[edge]
