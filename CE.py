@@ -3366,6 +3366,7 @@ All_Cycles = []
 All_Paths = []
 Disconnected_Solutions = []
 print("Start cycle extraction")
+segments, Path_Constraints = parse_graph_file(graph_file_path)
 while True: #while Iteration==1:
     ###################################################
     # ########### Solve ###############################
