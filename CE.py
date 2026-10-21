@@ -3368,6 +3368,9 @@ Disconnected_Solutions = []
 print("Start cycle extraction")
 segments, Path_Constraints = parse_graph_file(graph_file_path)
 while True: #while Iteration==1:
+    if total_solution_weight > 0.9*weight_graph:
+        Num_cycles=Cycle_Or_Path_Number-1
+        break
     ###################################################
     # ########### Solve ###############################
     ###################################################
@@ -3671,6 +3674,9 @@ print("Start path extraction")
 start=time.time()
 delta_F=0
 while True: # while Iteration==1:
+    if total_solution_weight > 0.9*weight_graph:
+        Num_paths=Cycle_Or_Path_Number-Num_cycles-1
+        break
     ILP_Path_model, variables = path_model_builder(
                     G,
                     nodes,
