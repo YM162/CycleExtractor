@@ -2490,6 +2490,8 @@ def build_path_model(
             ) == 1,
             name="OneEdgeIntoT"
         )
+    model.addConstr(flow_out_s_discordant == F, name="FlowFromS_Equals_F")
+    model.addConstr(flow_in_t_discordant == F, name="FlowIntoT_Equals_F")
     ### Constraint 7 #Big-M constant (ensure it's large enough)    
     M = 1000000    
     for edge in concordant_edges:
