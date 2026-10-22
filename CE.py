@@ -2702,6 +2702,41 @@ def build_path_model_highs(*args, **kwargs):
     kwargs["solver_api"] = HighsGRB
     return build_path_model(*args, **kwargs)
 
+######### Divide the MILP into ranges of the walk's copy number F, highest first. Each range must beat the best so far.
+def solve_by_copy_number_ranges(build_model, capacity_concordant_edges, capacity_discordant_edges, use_ranges, time_limit):
+    # Turn off ranges. for now it's only implemented for Gurobi
+    if not use_ranges:
+        model, variables = build_model()
+        model.setParam("TimeLimit", time_limit)
+        model.optimize()
+        return model, variables
+    
+    #We set the maximum copy number to be the maximum capacity of any edge + 1
+    top = max([1.0] + list(capacity_concordant_edges.values()) + list(capacity_discordant_edges.values())) + 1.0
+    best, deadline = None, time.time() + time_limit
+    
+    #I chose three equal ranges in log scale, plus one between 0 and 1, but this could be tuned.
+    for lo, hi in [(top ** (2 / 3), top), (top ** (1 / 3), top ** (2 / 3)), (1.0, top ** (1 / 3)), (0.0, 1.0 - 1e-6)]:
+        model, variables = build_model()
+        variables["F"].LB, variables["F"].UB = lo, hi
+        model.setParam("TimeLimit", max(deadline - time.time(), 0))
+        # If the solution is <1, it will be discarded later, so we can stop searching for better solutions as soon as we prove it is in that range.
+        if lo == 0:
+            model.setParam("SolutionLimit", 1)
+
+        if best or lo > 0:
+            #We set the bar to be the best value so far, or 1 (Which would be the minimum for a 1bp 1 copy number path, the minimum possible solution).
+            #This allows us to prune the search space for everything worse than the best solution so far.
+            bar = best[0].ObjVal if best else 1.0
+            #The extra 1e-6*bar enforces the solution to be stricty better. As we are going from higher to lower, this breaks ties by getting the highest copy number solution.
+            model.setParam("Cutoff", bar + 1e-6 * bar)
+        
+        model.optimize()
+        if model.Status == GRB.OPTIMAL:
+            best = (model, variables)
+        elif model.Status not in (GRB.INFEASIBLE, GRB.INF_OR_UNBD, GRB.CUTOFF):
+            return model, variables
+    return best or (model, variables)
 
 ########## Heuristic to create paths
 def create_s_t_walks(sequence_edges, f_sequence_edge, discordant_edges, f_discordant_edge, 
@@ -3384,7 +3419,7 @@ while True: #while Iteration==1:
     ###################################################
     
     ####### Cycle solution
-    ILP_Cycle_model, variables = cycle_model_builder(
+    build_model = lambda: cycle_model_builder(
                     G,
                     nodes,
                     concordant_edges,
@@ -3403,10 +3438,10 @@ while True: #while Iteration==1:
                     ENFORCE_CONNECTIVITY,
                     gamma)
     
-    ILP_Cycle_model.setParam('TimeLimit', TIME_LIMIT_SECONDS)
     print(f"Start extracting cycle {Cycle_Or_Path_Number}")
     start_time = time.time()
-    ILP_Cycle_model.optimize()
+    ILP_Cycle_model, variables = solve_by_copy_number_ranges(build_model, capacity_concordant_edges, capacity_discordant_edges,
+        args.solver == "gurobi", TIME_LIMIT_SECONDS)
     end_time = time.time()
     
     X_concordant_edge = variables["X_concordant_edge"]
@@ -3689,7 +3724,7 @@ while True: # while Iteration==1:
     if total_solution_weight > 0.9*weight_graph:
         Num_paths=Cycle_Or_Path_Number-Num_cycles-1
         break
-    ILP_Path_model, variables = path_model_builder(
+    build_model = lambda: path_model_builder(
                     G,
                     nodes,
                     concordant_edges,
@@ -3707,10 +3742,10 @@ while True: # while Iteration==1:
                     path_constraints,
                     ENFORCE_CONNECTIVITY,
                     gamma) 
-    ILP_Path_model.setParam('TimeLimit', TIME_LIMIT_SECONDS)
     print(f"Start running Iteration {Iteration}")
     start_time = time.time()
-    ILP_Path_model.optimize()
+    ILP_Path_model, variables = solve_by_copy_number_ranges(build_model, capacity_concordant_edges, capacity_discordant_edges,
+        args.solver == "gurobi", TIME_LIMIT_SECONDS)
     end_time = time.time()
     print(f"Finish running Iteration {Iteration}")
 
