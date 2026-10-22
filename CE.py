@@ -3762,7 +3762,7 @@ while True: # while Iteration==1:
         if delta_F>0:
             start_time_to_update = time.time()
             walk_edges = {
-                edge for edge_type, edge in Final_closed_walk
+                edge for edge_type, edge in s_t_Walk[0]
                 if edge_type in ("sequence edge", "concordant edge", "discordant edge")
             }
             f_sequence_edge_val = {
