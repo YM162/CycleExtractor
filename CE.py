@@ -3751,7 +3751,6 @@ while True: # while Iteration==1:
     Final_s_t_Walk = Final_s_t_Walk_segments
     matched_index_set = set(best_path_candidate["matched_constraints"])
     Final_s_t_walk_completion_test = best_path_candidate["completion_test"]
-    F_val -= delta_F
     delta_F=0
     if not Final_s_t_walk_completion_test:
         delta_F=Increase_CN(s_t_Walk[0], F_val, capacity_sequence_edges, capacity_concordant_edges, capacity_discordant_edges)
