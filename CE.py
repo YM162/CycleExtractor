@@ -24,6 +24,7 @@ import os
 import argparse
 import subprocess
 from pathlib import Path
+import functools
 
 
 class HighsGRB:
@@ -311,9 +312,11 @@ class EdgeMultiplicityModel:
 
     @staticmethod
     def check_valid_discordant_rc_partition(
-        rc_list: List[int], partition: List[int], max_multiplicity: int = 5
+        rc_list: List[int], partition: List[int], max_multiplicity: int = 5, mean=None
     ) -> Optional[Tuple[int, float]]:
         """Verify if a given partition of discordant edges meets the CoRAL criteria."""
+        if mean is None:
+            mean = lambda a, k: np.average(rc_list[a : a + k])
         if partition[0] == partition[1]:
             return (partition[0], 0.0)
         rc_list_p = rc_list[partition[0] : partition[1] + 1]
@@ -322,14 +325,14 @@ class EdgeMultiplicityModel:
         base_ri = 0
         while base_ri < len(rc_list_p) and rc_list_p[base_ri] < rc_list_p[0] * 2.0:
             base_ri += 1
-        base_avg_rc = cast(float, np.average(rc_list_p[:base_ri]))
+        base_avg_rc = cast(float, mean(partition[0], base_ri))
         if rc_list_p[-1] / base_avg_rc >= max_multiplicity + 0.5:
             return None
         score = -10.0
         best_ri = base_ri
         sum_deviation = 1.0
         for base_ri_ in range(base_ri, 0, -1):
-            base_avg_rc = cast(float, np.average(rc_list_p[:base_ri_]))
+            base_avg_rc = cast(float, mean(partition[0], base_ri_))
             base_size = len(rc_list_p[:base_ri_])
             sizes = {}
             li = base_ri_
@@ -377,18 +380,6 @@ class EdgeMultiplicityModel:
             return (best_ri + partition[0] - 1, score)
         return None
 
-    @staticmethod
-    def enumerate_partitions(
-        k: int, start: int, end: int
-    ) -> Generator[List[List[int]], None, None]:
-        """Generate all partitions of the interval [start, end] into k parts."""
-        if k == 0:
-            yield [[start, end]]
-        else:
-            for i in range(1, end - start - k + 2):
-                for res in EdgeMultiplicityModel.enumerate_partitions(k - 1, start + i, end):
-                    yield [[start, start + i - 1], *res]
-
     def infer_discordant_edge_multiplicities(
         self, max_multiplicity: int = 5
     ) -> List[int]:
@@ -400,45 +391,53 @@ class EdgeMultiplicityModel:
         rc_list = sorted(rc_list)
         if np.log2(rc_list[-1]) - np.log2(rc_list[0]) < 1.0:
             return [1 for i in rc_indices]
+        # The approach used by CoRAL has exponential time complexity with the number of clusters, which is probably not a problem for most long-read data.
+        # However, with short-read sometimes some graphs are too complex for it (Amplicon 2 from this sample, for example, takes more than 1h to complete
+        # this step with the original code: https://ampliconrepository.org/project/6a5a4a970664f9111b586742/sample/SJSA1). 
+        # A dynamic programming approach can bring it down to polynomial time. I tried something similar to a Jenks natural 
+        # breaks optimization but maximizing the score instead of minimizing variance.
+        # So we have:
+        #   best(1, e) = score(0, e)
+        #   best(c, e) = max over j of best(c - 1, j - 1) + score(j, e) + gap(j)
+        # where score(j, e) scores the cluster rc_list[j : e + 1] (None if not valid) 
+        # and gap(j) = log2(rc_list[j]) - log2(rc_list[j - 1]). 
+
+        # The same mean is recomputed a lot of times, so we can cache it to speed up the process.
+        @functools.cache
+        def mean(a, k):
+            return np.average(rc_list[a : a + k])
+        
+        @functools.cache
+        def cluster(j, e):
+            return EdgeMultiplicityModel.check_valid_discordant_rc_partition(
+                rc_list, [j, e], max_multiplicity, mean
+            )
+        
+        @functools.cache
+        def best(c,e):
+            """(score, clusters) of the best split of rc_list[0 : e + 1] into c valid
+            clusters, or None if there is no such split."""
+            if c == 1:
+                return None if cluster(0, e) is None else (cluster(0, e)[1], [[0, e]])
+            splits = []
+            for j in range(c - 1, e + 1):
+                if best(c - 1, j - 1) is None or cluster(j, e) is None:
+                    continue
+                score, clusters = best(c - 1, j - 1)
+                gap = np.log2(rc_list[j]) - np.log2(rc_list[j - 1])
+                splits.append((score + cluster(j, e)[1] + gap, clusters + [[j, e]]))
+            return max(splits, key=lambda split: split[0], default=None)
+
+        # Increment the number of clusters until there is a valid split
         num_clusters = 1
-        valid_clustering = False
-        best_score_all = -10.0
-        best_partitions = []
-        distinct_all = []
-    
-        while not valid_clustering:
-            valid_clustering = False
-            for partitions in EdgeMultiplicityModel.enumerate_partitions(
-                num_clusters - 1, 0, len(rc_list) - 1
-            ):
-                valid_partition = True
-                score_all = 0.0
-                distinct = []
-                for pi in range(len(partitions)):
-                    partition = partitions[pi]
-                    scored_partition = EdgeMultiplicityModel.check_valid_discordant_rc_partition(
-                        rc_list,
-                        partition,
-                        max_multiplicity,
-                    )
-                    if scored_partition is None:
-                        valid_partition = False
-                        break
-                    base_ri, score = scored_partition
-                    score_all += score
-                    distinct.append([partitions[pi][0], base_ri])
-                    if pi > 0:
-                        score_all += np.log2(rc_list[partitions[pi][0]]) - np.log2(
-                            rc_list[partitions[pi - 1][1]]
-                        )
-                if valid_partition:
-                    valid_clustering = True
-                    if score_all > best_score_all:
-                        best_score_all = score_all
-                        best_partitions = partitions
-                        distinct_all = distinct
-            if not valid_clustering:
-                num_clusters += 1
+        while best(num_clusters, len(rc_list) - 1) is None:
+            num_clusters += 1
+        score_all, partitions = best(num_clusters, len(rc_list) - 1)
+
+        # Kept the same filter as in CoRAL.
+        best_partitions = partitions if score_all > -10.0 else []
+        distinct_all = [[j, cluster(j, e)[0]] for j, e in best_partitions]
+
         multiplicities_sorted = []
         for pi in range(len(best_partitions)):
             partition = best_partitions[pi]
