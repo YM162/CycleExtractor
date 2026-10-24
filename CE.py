@@ -764,39 +764,6 @@ def Create_graph(graph_file_path):
             path_constraints
         )
 
-############ creat graph with nodes "s" and "t" for one connected cycle extraction
-def creat_s_t_graph_for_connected_cycles(G,capacity_discordant_edges,capacity_sequence_edges,K_discordant_edges,length_sequence_edges):
-    G.add_node('s')
-    G.add_node('t')
-    
-    new_capacity_discordant_edges = dict(capacity_discordant_edges)
-    new_capacity_sequence_edges = dict(capacity_sequence_edges)
-    
-    for node in G.nodes():
-        if node in {'s', 't'} or (isinstance(node, str) and node.isdigit()):
-            continue
-        
-        # Compute capacity from incident edges
-        dc_cns = [data.get('capacity', 0) for _, _, data in get_incident_edges(G, node, edge_type_filter='discordant')]
-        seq_cns = [data.get('capacity', 0) for _, _, data in get_incident_edges(G, node, edge_type_filter='sequence')]
-        capacity = max(dc_cns + seq_cns) if (dc_cns + seq_cns) else 1
-        
-        # Add edges (undirected)
-        G.add_edge('s', node, type='discordant', capacity=capacity, Read_Count=1000, K=1)
-        G.add_edge('t', node, type='sequence', capacity=capacity, Read_Count=1000, length=1)
-        
-        # Update capacities using sorted tuple
-        new_capacity_discordant_edges[tuple(sorted(('s', node)))] = capacity
-        new_capacity_sequence_edges[tuple(sorted(('t', node)))] = capacity
-    
-    discordant_edges = {tuple(sorted((u, v))) for u, v, attr in G.edges(data=True) if attr.get('type') == 'discordant'}
-    sequence_edges = {tuple(sorted((u, v))) for u, v, attr in G.edges(data=True) if attr.get('type') == 'sequence'}
-    
-    K_discordant_edges = {tuple(sorted((u, v))): attr["K"] for u, v, key, attr in G.edges(keys=True, data=True) if attr.get("type") == "discordant" and "K" in attr}
-    length_sequence_edges = {tuple(sorted((u, v))): attr.get("length", 1) for u, v, key, attr in G.edges(keys=True, data=True) if attr.get("type") == "sequence"}
-    
-    return G, G.nodes, discordant_edges, new_capacity_discordant_edges, sequence_edges, new_capacity_sequence_edges, K_discordant_edges, length_sequence_edges
-
 ########## Calculate Length weighted copy number of the graph
 def compute_Length_weighted_copy_number_graph(capacity_sequence_edges,length_sequence_edges):
     valid_edges = [
@@ -848,7 +815,6 @@ def build_cycle_model(
                 p_concordant_edges,
                 p_discordant_edges,
                 path_constraints,
-                enforce_connectivity,
                 gamma,
                 model_class=Model,
                 solver_api=GRB):
@@ -880,13 +846,13 @@ def build_cycle_model(
     
     ### Objective function
     if len(path_constraints)>0:
-        multiplier= gamma* sum(capacity_sequence_edges[tuple(sorted((i, j)))] * length_sequence_edges[tuple(sorted((i, j)))] for (i, j) in sequence_edges if i != 't' and j != 't')/ len(path_constraints)
+        multiplier= gamma* sum(capacity_sequence_edges[tuple(sorted((i, j)))] * length_sequence_edges[tuple(sorted((i, j)))] for (i, j) in sequence_edges)/ len(path_constraints)
     else:
         multiplier=0
     
    ### Objective: Maximize total flow on sequence edges weighted by length and number of path constraints satisfied
     model.setObjective(
-        sum(f_sequence_edge[tuple(sorted((i, j)))] * length_sequence_edges[tuple(sorted((i, j)))] for (i, j) in sequence_edges if i != 't' and j != 't')+ multiplier*sum(P[k] for k in range(len(path_constraints))),
+        sum(f_sequence_edge[tuple(sorted((i, j)))] * length_sequence_edges[tuple(sorted((i, j)))] for (i, j) in sequence_edges)+ multiplier*sum(P[k] for k in range(len(path_constraints))),
         solver_api.MAXIMIZE
     )
     # Constraint 1: Copy number of an edge ≤ capacity × selection variable (for undirected edges)
@@ -914,9 +880,6 @@ def build_cycle_model(
             edges_at_node.setdefault(node, set()).add(edge)  
     
     for k in nodes:
-        if k in {"s", "t"}:
-            continue
-    
         # Define undirected incident edges
         incident_edges = {edge for edge in edges_at_node.get(k, ()) if edge[0] != edge[1]}
         
@@ -940,7 +903,8 @@ def build_cycle_model(
             flow_in_sequence == flow_out_concordant + flow_out_discordant,
             name=f"FlowConservation2_{k}")
     ### Constraint 7 #Big-M constant (ensure it's large enough)    
-    M = 1000000    
+    # F is at most a selected edge's capacity, so this M is valid; a larger one (10^6) can let near-integral binaries leak copies.
+    M = max([1, *capacity_concordant_edges.values(), *capacity_discordant_edges.values()]) + 1
     for edge in concordant_edges:
         i, j = edge
         edge_key = tuple(sorted((i, j)))
@@ -986,195 +950,6 @@ def build_cycle_model(
         model.addConstr(
             X_discordant_edge[edge_key] >= P[k] * p_discordant_edges[(i, j, k)])
     
-    if enforce_connectivity:
-        #####################################################    
-        ##### Ensure Connectivity Variables
-        #####################################################
-        all_edges = concordant_edges | discordant_edges | sequence_edges
-        # Generate all directed versions of directed variables on undirected edges
-        directed_sequence_edges = {(u, v) for u, v in sequence_edges} | {(v, u) for u, v in sequence_edges}
-        directed_concordant_edges = {(u, v) for u, v in concordant_edges} | {(v, u) for u, v in concordant_edges}
-        directed_discordant_edges = {(u, v) for u, v in discordant_edges} | {(v, u) for u, v in discordant_edges}
-        c_seq  = model.addVars(directed_sequence_edges,   vtype=solver_api.BINARY, name="c_seq")
-        c_conc = model.addVars(directed_concordant_edges, vtype=solver_api.BINARY, name="c_conc")
-        c_disc = model.addVars(directed_discordant_edges, vtype=solver_api.BINARY, name="c_disc")
-        d = model.addVars(G.nodes, vtype=solver_api.INTEGER, lb=0, ub=len(G.nodes), name="d")
-        
-        ##### Connectivity constraints for s and t  Constraint  "s" and "t" edges and the copy number of their incident edges
-        flow_out_s_discordant = sum(
-                f_discordant_edge[tuple(sorted(("s", k)))]
-                for k in nodes
-                if tuple(sorted(("s", k))) in discordant_edges
-            )
-            
-            ### Total flow into sink 't' on discordant edges
-        flow_in_t_sequence = sum(
-                f_sequence_edge[tuple(sorted((k, "t")))]
-                for k in nodes
-                if tuple(sorted((k, "t"))) in sequence_edges
-            )
-            
-            ### Enforce the flow match
-        model.addConstr(
-                flow_out_s_discordant == flow_in_t_sequence,
-                name="TotalFlowFromS_Equals_FlowIntoT"
-            )
-            
-        model.addConstr(
-                sum(
-                    X_discordant_edge[tuple(sorted(("s", k)))]
-                    for k in nodes
-                    if tuple(sorted(("s", k))) in discordant_edges
-                ) == 1,
-                name="OneEdgeOutOfS"
-            )
-    
-        model.addConstr(
-                sum(
-                    X_sequence_edge[tuple(sorted((k, "t")))]
-                    for k in nodes
-                    if tuple(sorted((k, "t"))) in sequence_edges
-                ) == 1,
-                name="OneEdgeIntoT"
-            )
-        #if node in {'s', 't'} or (isinstance(node, str) and node.isdigit()):
-        for k in nodes:
-            if k in {"s", "t"} or k.isdigit():
-               continue
-            model.addConstr(
-                X_discordant_edge[tuple(sorted(("s", k)))] == X_sequence_edge[tuple(sorted((k, "t")))],
-                name=f"s_t_same_node_{k}"
-            )
-        
-        ######################################################
-        ######### Connectivity constraint 0 #################
-        ###### Just about 's' which is the start node #######
-        ##### d(s)=1, y_plus ('s', only one node)=1 that is where X_...=1
-        ##### y_minu('s', every other node)=0, y_plus(every other node,'s')=0
-        ###################################################### 
-       
-        for u, v in directed_discordant_edges:
-            if u != 's':
-                continue
-            edge = tuple(sorted((u, v)))  # Get the undirected version
-        
-            # Only add constraint if this edge exists in X variables
-            
-            if edge in X_discordant_edge:
-                x_var = X_discordant_edge[edge]
-            else:
-                continue  # Skip if edge not in any X set
-        
-            model.addConstr(
-                c_disc[u, v] ==x_var,
-                name=f"y_dir_limit_{u}_{v}"
-            )  
-            model.addConstr(
-                c_disc[v,u] ==0,
-                name=f"y_dir_limit_{u}_{v}"
-            ) 
-            
-            
-        model.addConstr(d['s'] == 1, name='d_start_node_one')
-        ######################################################
-        ######### Connectivity constraint 1 #################
-        ######################################################
-        num_nodes = len(G.nodes)
-    
-        for u in G.nodes:
-            incident_x_vars = []
-            for v in G.neighbors(u):
-                edge = tuple(sorted((u, v)))
-                if edge in sequence_edges:
-                    incident_x_vars.append(X_sequence_edge[edge])
-                if edge in concordant_edges:
-                    incident_x_vars.append(X_concordant_edge[edge])
-                if edge in discordant_edges:
-                    incident_x_vars.append(X_discordant_edge[edge])
-            model.addConstr(
-                d[u] <= num_nodes * sum(incident_x_vars),
-                name=f"only_assign_d_if_used_{u}"
-            )
-            
-        ###################################################
-        ###### Connectivity constraint 2 ##################
-        ###################################################
-                            
-        for u, v in sequence_edges:
-            edge = tuple(sorted((u, v)))
-            model.addConstr(c_seq[u, v] + c_seq[v, u] <= X_sequence_edge[(u, v)], name=f"dir_seq_use_{u}_{v}")
-        
-        for u, v in concordant_edges:
-            edge = tuple(sorted((u, v)))
-            model.addConstr(c_conc[u, v] + c_conc[v, u] <= X_concordant_edge[(u, v)], name=f"dir_conc_use_{u}_{v}")
-        
-        for u, v in discordant_edges:
-            edge = tuple(sorted((u, v)))
-            model.addConstr(c_disc[u, v] + c_disc[v, u] <= X_discordant_edge[(u, v)], name=f"dir_disc_use_{u}_{v}")
-        
-        ###################################################
-        ######### Connectivity constraint 3 ###############
-        ###################################################
-        all_nodes = list(G.nodes)
-        for u in all_nodes:
-            if u == 's':
-                continue  # skip source
-            incoming_c = []
-    
-            for v in all_nodes:
-                if (v, u) in c_seq:
-                    incoming_c.append(c_seq[v, u])
-                if (v, u) in c_conc:
-                    incoming_c.append(c_conc[v, u])
-                if (v, u) in c_disc:
-                    incoming_c.append(c_disc[v, u])
-        
-            incoming_sum = sum(incoming_c)
-        
-            # Compute total x variables that involve u (undirected edge participation)
-            x_incident = []
-            for v in G.neighbors(u):
-                edge = tuple(sorted((u, v)))  # undirected
-                if edge in X_sequence_edge:
-                    x_incident.append(X_sequence_edge[edge])
-                if edge in X_concordant_edge:
-                    x_incident.append(X_concordant_edge[edge])
-                if edge in X_discordant_edge:
-                    x_incident.append(X_discordant_edge[edge])
-        
-            x_total = sum(x_incident)
-            print('x_total for', u, 'is', x_total)
-        
-            # Constraint: if node u is in the solution, it must have at least one incoming edge
-            model.addConstr(
-                incoming_sum >= (1/num_nodes)*x_total,
-                name=f"incoming_constraint_{u}"
-            )
-        ###################################################
-        ######### Connectivity constraint 4 ###############
-        ###################################################
-                        
-        for u, v in directed_sequence_edges:
-            if (u, v) in c_seq:
-                model.addConstr(
-                    d[v] - d[u] + num_nodes * (1 - c_seq[u, v]) >= 1,
-                    name=f"d_order_sequence_{u}_{v}"
-                )
-        for u, v in directed_concordant_edges:
-            if (u, v) in c_conc:
-                model.addConstr(
-                    d[v] - d[u] + num_nodes * (1 - c_conc[u, v]) >= 1,
-                    name=f"d_order_concordant_{u}_{v}"
-                )
-        for u, v in directed_discordant_edges:
-            if (u, v) in c_disc:
-                model.addConstr(
-                    d[v] - d[u] + num_nodes * (1 - c_disc[u, v]) >= 1,
-                    name=f"d_order_discordant_{u}_{v}"
-                )
-        ###################################################
-        ######### End of constraints ###############
-        ###################################################
     return model, {
         "X_concordant_edge": X_concordant_edge,
         "X_discordant_edge": X_discordant_edge,
@@ -2145,55 +1920,6 @@ def update_the_graph( concordant_edges, f_concordant_edge, X_concordant_edge, ca
         if f_sequence_edge[edge] > 0 and X_sequence_edge[edge] > 0: # and edge in walk_edges:
             capacity_sequence_edges[edge] -= f_sequence_edge[edge]
     return capacity_concordant_edges, capacity_discordant_edges, capacity_sequence_edges
-############ Remove s and t nodes and the their edges
-def remove_s_t_from_graph(
-    G,
-    capacity_discordant_edges,
-    capacity_sequence_edges,
-    K_discordant_edges,
-    length_sequence_edges
-):
-    """
-    Remove nodes 's' and 't' and all their incident edges from the graph G.
-    Also remove the associated entries from the capacity and length dictionaries.
-    """
-
-    # Make fresh dictionaries so original ones stay untouched
-    new_capacity_discordant_edges = dict(capacity_discordant_edges)
-    new_capacity_sequence_edges   = dict(capacity_sequence_edges)
-    new_K_discordant_edges        = dict(K_discordant_edges)
-    new_length_sequence_edges     = dict(length_sequence_edges)
-
-    # 1. Collect all edges to 's' and 't'
-    s_edges = [(u, v) for u, v in G.edges() if 's' in (u, v)]
-    t_edges = [(u, v) for u, v in G.edges() if 't' in (u, v)]
-
-    # 2. Remove these edges from G
-    for u, v in s_edges + t_edges:
-        if G.has_edge(u, v):
-            G.remove_edge(u, v)
-
-    # 3. Remove the nodes 's' and 't' from G
-    if 's' in G:
-        G.remove_node('s')
-    if 't' in G:
-        G.remove_node('t')
-
-    # 4. Remove dictionary entries for edges connected to 's' or 't'
-    for d in [new_capacity_discordant_edges, new_capacity_sequence_edges,
-              new_K_discordant_edges, new_length_sequence_edges]:
-        for edge in list(d.keys()):
-            if 's' in edge or 't' in edge:
-                d.pop(edge, None)
-
-    # 5. Recompute sets of edges after removal
-    discordant_edges = {tuple(sorted((u, v))) for u, v, attr in G.edges(data=True)
-                        if attr.get('type') == 'discordant'}
-    sequence_edges   = {tuple(sorted((u, v))) for u, v, attr in G.edges(data=True)
-                        if attr.get('type') == 'sequence'}
-
-    return G, G.nodes, discordant_edges, new_capacity_discordant_edges, sequence_edges, \
-           new_capacity_sequence_edges, new_K_discordant_edges, new_length_sequence_edges
 ########## creat graph with nodes "s" and "t"
 def creat_s_t_graph(G,capacity_discordant_edges,K_discordant_edges):
     G.add_node('s')
@@ -2361,7 +2087,6 @@ def build_path_model(
                 p_concordant_edges,
                 p_discordant_edges,
                 path_constraints,
-                enforce_connectivity,
                 gamma,
                 model_class=Model,
                 solver_api=GRB):
@@ -2492,7 +2217,8 @@ def build_path_model(
     model.addConstr(flow_out_s_discordant == F, name="FlowFromS_Equals_F")
     model.addConstr(flow_in_t_discordant == F, name="FlowIntoT_Equals_F")
     ### Constraint 7 #Big-M constant (ensure it's large enough)    
-    M = 1000000    
+    # F is at most a selected edge's capacity, so this M is valid; a larger one (10^6) can let near-integral binaries leak copies.
+    M = max([1, *capacity_concordant_edges.values(), *capacity_discordant_edges.values()]) + 1
     for edge in concordant_edges:
         i, j = edge
         edge_key = tuple(sorted((i, j)))
@@ -2538,151 +2264,6 @@ def build_path_model(
         model.addConstr(
             X_discordant_edge[edge_key] >= P[k] * p_discordant_edges[(i, j, k)])
         
-    if enforce_connectivity:
-        #####################################################    
-        ##### Ensure Connectivity Variables
-        #####################################################
-        all_edges = concordant_edges | discordant_edges | sequence_edges
-        # Generate all directed versions of directed variables on undirected edges
-        directed_sequence_edges = {(u, v) for u, v in sequence_edges} | {(v, u) for u, v in sequence_edges}
-        directed_concordant_edges = {(u, v) for u, v in concordant_edges} | {(v, u) for u, v in concordant_edges}
-        directed_discordant_edges = {(u, v) for u, v in discordant_edges} | {(v, u) for u, v in discordant_edges}
-        c_seq  = model.addVars(directed_sequence_edges,   vtype=solver_api.BINARY, name="c_seq")
-        c_conc = model.addVars(directed_concordant_edges, vtype=solver_api.BINARY, name="c_conc")
-        c_disc = model.addVars(directed_discordant_edges, vtype=solver_api.BINARY, name="c_disc")
-        d = model.addVars(G.nodes, vtype=solver_api.INTEGER, lb=0, ub=len(G.nodes), name="d")
-        
-    
-        
-        ######################################################
-        ######### Connectivity constraint 0 #################
-        ###### Just about 's' which is the start node #######
-        ##### d(s)=1, y_plus ('s', only one node)=1 that is where X_...=1
-        ##### y_minu('s', every other node)=0, y_plus(every other node,'s')=0
-        ###################################################### 
-       
-        for u, v in directed_discordant_edges:
-            if u != 's':
-                continue
-            edge = tuple(sorted((u, v)))  # Get the undirected version
-        
-            # Only add constraint if this edge exists in X variables
-            
-            if edge in X_discordant_edge:
-                x_var = X_discordant_edge[edge]
-            else:
-                continue  # Skip if edge not in any X set
-        
-            model.addConstr(
-                c_disc[u, v] ==x_var,
-                name=f"y_dir_limit_{u}_{v}"
-            )  
-            model.addConstr(
-                c_disc[v,u] ==0,
-                name=f"y_dir_limit_{u}_{v}"
-            ) 
-            
-            
-        model.addConstr(d['s'] == 1, name='d_start_node_one')
-        ######################################################
-        ######### Connectivity constraint 1 #################
-        ######################################################
-        num_nodes = len(G.nodes)
-    
-        for u in G.nodes:
-            incident_x_vars = []
-            for v in G.neighbors(u):
-                edge = tuple(sorted((u, v)))
-                if edge in sequence_edges:
-                    incident_x_vars.append(X_sequence_edge[edge])
-                if edge in concordant_edges:
-                    incident_x_vars.append(X_concordant_edge[edge])
-                if edge in discordant_edges:
-                    incident_x_vars.append(X_discordant_edge[edge])
-            model.addConstr(
-                d[u] <= num_nodes * sum(incident_x_vars),
-                name=f"only_assign_d_if_used_{u}"
-            )
-            
-        ###################################################
-        ###### Connectivity constraint 2 ##################
-        ###################################################
-                            
-        for u, v in sequence_edges:
-            edge = tuple(sorted((u, v)))
-            model.addConstr(c_seq[u, v] + c_seq[v, u] <= X_sequence_edge[(u, v)], name=f"dir_seq_use_{u}_{v}")
-        
-        for u, v in concordant_edges:
-            edge = tuple(sorted((u, v)))
-            model.addConstr(c_conc[u, v] + c_conc[v, u] <= X_concordant_edge[(u, v)], name=f"dir_conc_use_{u}_{v}")
-        
-        for u, v in discordant_edges:
-            edge = tuple(sorted((u, v)))
-            model.addConstr(c_disc[u, v] + c_disc[v, u] <= X_discordant_edge[(u, v)], name=f"dir_disc_use_{u}_{v}")
-        
-        ###################################################
-        ######### Connectivity constraint 3 ###############
-        ###################################################
-        all_nodes = list(G.nodes)
-        for u in all_nodes:
-            if u == 's':
-                continue  # skip source
-            incoming_c = []
-    
-            for v in all_nodes:
-                if (v, u) in c_seq:
-                    incoming_c.append(c_seq[v, u])
-                if (v, u) in c_conc:
-                    incoming_c.append(c_conc[v, u])
-                if (v, u) in c_disc:
-                    incoming_c.append(c_disc[v, u])
-        
-            incoming_sum = sum(incoming_c)
-        
-            # Compute total x variables that involve u (undirected edge participation)
-            x_incident = []
-            for v in G.neighbors(u):
-                edge = tuple(sorted((u, v)))  # undirected
-                if edge in X_sequence_edge:
-                    x_incident.append(X_sequence_edge[edge])
-                if edge in X_concordant_edge:
-                    x_incident.append(X_concordant_edge[edge])
-                if edge in X_discordant_edge:
-                    x_incident.append(X_discordant_edge[edge])
-        
-            x_total = sum(x_incident)
-            print('x_total for', u, 'is', x_total)
-        
-            # Constraint: if node u is in the solution, it must have at least one incoming edge
-            model.addConstr(
-                incoming_sum >= (1/num_nodes)*x_total,
-                name=f"incoming_constraint_{u}"
-            )
-        ###################################################
-        ######### Connectivity constraint 4 ###############
-        ###################################################
-                        
-        for u, v in directed_sequence_edges:
-            if (u, v) in c_seq:
-                model.addConstr(
-                    d[v] - d[u] + num_nodes * (1 - c_seq[u, v]) >= 1,
-                    name=f"d_order_sequence_{u}_{v}"
-                )
-        for u, v in directed_concordant_edges:
-            if (u, v) in c_conc:
-                model.addConstr(
-                    d[v] - d[u] + num_nodes * (1 - c_conc[u, v]) >= 1,
-                    name=f"d_order_concordant_{u}_{v}"
-                )
-        for u, v in directed_discordant_edges:
-            if (u, v) in c_disc:
-                model.addConstr(
-                    d[v] - d[u] + num_nodes * (1 - c_disc[u, v]) >= 1,
-                    name=f"d_order_discordant_{u}_{v}"
-                )
-        ###################################################
-        ######### End of constraints ###############
-        ###################################################
     return model, {
         "X_concordant_edge": X_concordant_edge,
         "X_discordant_edge": X_discordant_edge,
@@ -2701,13 +2282,46 @@ def build_path_model_highs(*args, **kwargs):
     kwargs["solver_api"] = HighsGRB
     return build_path_model(*args, **kwargs)
 
+# Solve. In CEc mode (--enforce-connectivity), while the selected edges form more than one connected component, cut that solution off and re-solve.
+def optimize_connected(model, variables, enforce_connectivity, deadline):
+    model.optimize()
+    edges = [item for name in ("X_sequence_edge", "X_concordant_edge", "X_discordant_edge") for item in variables[name].items()]
+    # In the F < 1 range Gurobi stops at the first solution (SolutionLimit 1)
+    first_solution_only = lambda: not isinstance(model, HighsModel) and model.status == GRB.SOLUTION_LIMIT
+    while enforce_connectivity and (optimization_model_is_optimal(model) or first_solution_only()):
+        selected = [(edge, x) for edge, x in edges if x.X > 0.5]
+        pieces = sorted(nx.connected_components(nx.Graph(edge for edge, _ in selected)), key=lambda piece: "s" not in piece)
+        if len(pieces) < 2:
+            return
+        # Pieces that are a valid walk on their own: for paths only the one with s (and t), for cycles all of them
+        valid = [0] if "s" in pieces[0] else range(len(pieces))
+        if first_solution_only():
+            # The F < 1 range only has to show that a connected walk with F < 1 beats the cutoff. Each valid piece is such a walk,
+            # worth at least the flow on its sequence edges, so if one beats the cutoff we are done. Otherwise solve the range fully.
+            flow = lambda piece: sum(f.Obj * f.X for (i, j), f in variables["f_sequence_edge"].items() if i in piece)
+            if any(flow(pieces[c]) > model.Params.Cutoff for c in valid):
+                return
+            model.setParam("SolutionLimit", GRB.MAXINT)
+        # Cut off this solution with generalized subtour elimination constraints. For a component S and an edge e in S and
+        # f in another component: sum(X over delta(S)) >= X_e + X_f - 1, where delta(S) are the edges with one end in S.
+        # Any solution using both e and f must select an edge leaving S. Paths always use "s", so the component with s goes
+        # first, counts as always used (X = 1), and every other component needs only one cut: sum(X over delta(S)) >= X_e.
+        used = [1 if "s" in piece else next(x for edge, x in selected if edge[0] in piece) for piece in pieces]
+        for c, piece in enumerate(pieces):
+            leaving = sum(x for (i, j), x in edges if (i in piece) != (j in piece))
+            for d in valid:
+                if d != c:
+                    model.addConstr(leaving >= used[c] + used[d] - 1)
+        model.setParam("TimeLimit", max(deadline - time.time(), 0))
+        model.optimize()
+
 ######### Divide the MILP into ranges of the walk's copy number F, highest first. Each range must beat the best so far.
-def solve_by_copy_number_ranges(build_model, capacity_concordant_edges, capacity_discordant_edges, use_ranges, time_limit):
+def solve_by_copy_number_ranges(build_model, capacity_concordant_edges, capacity_discordant_edges, use_ranges, time_limit, enforce_connectivity):
     # Turn off ranges. for now it's only implemented for Gurobi
     if not use_ranges:
         model, variables = build_model()
         model.setParam("TimeLimit", time_limit)
-        model.optimize()
+        optimize_connected(model, variables, enforce_connectivity, time.time() + time_limit)
         return model, variables
     
     #We set the maximum copy number to be the maximum capacity of any edge + 1
@@ -2719,7 +2333,8 @@ def solve_by_copy_number_ranges(build_model, capacity_concordant_edges, capacity
         model, variables = build_model()
         variables["F"].LB, variables["F"].UB = lo, hi
         model.setParam("TimeLimit", max(deadline - time.time(), 0))
-        # If the solution is <1, it will be discarded later, so we can stop searching for better solutions as soon as we prove it is in that range.
+        # If the solution is <1, it will be discarded later, so we can stop searching for better solutions as soon as we prove it is in that range
+        # (in CEc, optimize_connected also makes sure a connected one exists).
         if lo == 0:
             model.setParam("SolutionLimit", 1)
 
@@ -2730,7 +2345,7 @@ def solve_by_copy_number_ranges(build_model, capacity_concordant_edges, capacity
             #The extra 1e-6*bar enforces the solution to be stricty better. As we are going from higher to lower, this breaks ties by getting the highest copy number solution.
             model.setParam("Cutoff", bar + 1e-6 * bar)
         
-        model.optimize()
+        optimize_connected(model, variables, enforce_connectivity, deadline)
         if model.Status == GRB.OPTIMAL:
             best = (model, variables)
         elif model.Status not in (GRB.INFEASIBLE, GRB.INF_OR_UNBD, GRB.CUTOFF):
@@ -3389,8 +3004,6 @@ print("Creating the graph:")
     p_discordant_edges,
     path_constraints
 ) = Create_graph(graph_file_path) 
-if ENFORCE_CONNECTIVITY:
-    G, nodes, discordant_edges, capacity_discordant_edges, sequence_edges, capacity_sequence_edges, K_discordant_edges, length_sequence_edges= creat_s_t_graph_for_connected_cycles(G,capacity_discordant_edges,capacity_sequence_edges,K_discordant_edges,length_sequence_edges)
 capacity_sequence_edges_original=capacity_sequence_edges.copy()
 total_solution_weight=0
 weight_graph=compute_Length_weighted_copy_number_graph(capacity_sequence_edges,length_sequence_edges)
@@ -3434,13 +3047,12 @@ while True: #while Iteration==1:
                     p_concordant_edges,
                     p_discordant_edges,
                     path_constraints,
-                    ENFORCE_CONNECTIVITY,
                     gamma)
     
     print(f"Start extracting cycle {Cycle_Or_Path_Number}")
     start_time = time.time()
     ILP_Cycle_model, variables = solve_by_copy_number_ranges(build_model, capacity_concordant_edges, capacity_discordant_edges,
-        args.solver == "gurobi", TIME_LIMIT_SECONDS)
+        args.solver == "gurobi", TIME_LIMIT_SECONDS, ENFORCE_CONNECTIVITY)
     end_time = time.time()
     
     X_concordant_edge = variables["X_concordant_edge"]
@@ -3684,23 +3296,6 @@ while True: #while Iteration==1:
     Cycle_Or_Path_Number +=1
 
 ######## Path solution
-if ENFORCE_CONNECTIVITY:
-    (
-        G,
-        nodes,
-        discordant_edges,
-        capacity_discordant_edges,
-        sequence_edges,
-        capacity_sequence_edges,
-        K_discordant_edges,
-        length_sequence_edges
-    ) = remove_s_t_from_graph(
-        G,
-        capacity_discordant_edges,
-        capacity_sequence_edges,
-        K_discordant_edges,
-        length_sequence_edges
-    )
         
 #G,G.nodes,discordant_edges,capacity_discordant_edges,K_discordant_edges = creat_s_t_graph(G,capacity_discordant_edges,K_discordant_edges)
 #G,G.nodes,discordant_edges,capacity_discordant_edges,K_discordant_edges = creat_s_t_graph_Coral(G,capacity_discordant_edges,K_discordant_edges, sequence_edges)
@@ -3739,12 +3334,11 @@ while True: # while Iteration==1:
                     p_concordant_edges,
                     p_discordant_edges,
                     path_constraints,
-                    ENFORCE_CONNECTIVITY,
                     gamma) 
     print(f"Start running Iteration {Iteration}")
     start_time = time.time()
     ILP_Path_model, variables = solve_by_copy_number_ranges(build_model, capacity_concordant_edges, capacity_discordant_edges,
-        args.solver == "gurobi", TIME_LIMIT_SECONDS)
+        args.solver == "gurobi", TIME_LIMIT_SECONDS, ENFORCE_CONNECTIVITY)
     end_time = time.time()
     print(f"Finish running Iteration {Iteration}")
 
