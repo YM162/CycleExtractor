@@ -3408,7 +3408,11 @@ while True: #while Iteration==1:
     P = variables["P"]
     y_discordant = variables["y_discordant"]
     z_discordant = variables["z_discordant"]
-    
+
+    if not optimization_model_is_optimal(ILP_Cycle_model):  # If we reach a time limit with no solution there are no values to read
+        Num_cycles=Cycle_Or_Path_Number-1
+        break
+
     X_concordant_edge_val  = {k: float(v.X) for k, v in X_concordant_edge.items()}
     X_discordant_edge_val  = {k: float(v.X) for k, v in X_discordant_edge.items()}
     X_sequence_edge_val    = {k: float(v.X) for k, v in X_sequence_edge.items()}
@@ -3706,6 +3710,10 @@ while True: # while Iteration==1:
     P = variables["P"]
     y_discordant = variables["y_discordant"]
     z_discordant = variables["z_discordant"]
+    
+    if not optimization_model_is_optimal(ILP_Path_model): # If we reach a time limit with no solution there are no values to read
+        Num_paths=Cycle_Or_Path_Number-Num_cycles-1
+        break
     
     X_concordant_edge_val  = {k: float(v.X) for k, v in X_concordant_edge.items()}
     X_discordant_edge_val  = {k: float(v.X) for k, v in X_discordant_edge.items()}
