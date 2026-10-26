@@ -2327,10 +2327,14 @@ def solve_by_copy_number_ranges(build_model, capacity_concordant_edges, capacity
     #We set the maximum copy number to be the maximum capacity of any edge + 1
     top = max([1.0] + list(capacity_concordant_edges.values()) + list(capacity_discordant_edges.values())) + 1.0
     best, deadline = None, time.time() + time_limit
+    built_model, built_variables = build_model()
+    built_model.update()
     
     #I chose three equal ranges in log scale, plus one between 0 and 1, but this could be tuned.
     for lo, hi in [(top ** (2 / 3), top), (top ** (1 / 3), top ** (2 / 3)), (1.0, top ** (1 / 3)), (0.0, 1.0 - 1e-6)]:
-        model, variables = build_model()
+        model = built_model.copy()
+        copied = model.getVars()
+        variables = {name: copied[v.index] if name == "F" else {key: copied[x.index] for key, x in v.items()} for name, v in built_variables.items()}
         variables["F"].LB, variables["F"].UB = lo, hi
         model.setParam("TimeLimit", max(deadline - time.time(), 0))
         # If the solution is <1, it will be discarded later, so we can stop searching for better solutions as soon as we prove it is in that range
