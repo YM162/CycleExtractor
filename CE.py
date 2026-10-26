@@ -1621,7 +1621,7 @@ def parse_node_colon_format(node_str):
     
      # Parse a node name like 'chr15:98778369-' into ('chr15', 98778369)
     
-    match = re.match(r"(chr[\w\d]+):(\d+)[+-]", node_str)
+    match = re.match(r"(.+):(\d+)[+-]$", node_str)
     if match:
         chrom = match.group(1)
         pos = int(match.group(2))
